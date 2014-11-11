@@ -25,7 +25,7 @@ from dpark.shuffle import Merger, CoGroupMerger
 from dpark.env import env
 from dpark import moosefs
 
-logger = logging.getLogger("rdd")
+logger = logging.getLogger(__name__)
 
 class Split(object):
     def __init__(self, idx):
@@ -212,6 +212,7 @@ class RDD(object):
 
     def reduce(self, f):
         def reducePartition(it):
+            logger = logging.getLogger(__name__)
             if self.err < 1e-8:
                 try:
                     return [reduce(f, it)]
@@ -228,7 +229,7 @@ class RDD(object):
                     else:
                         s = f(s, v)
                 except Exception, e:
-                    logging.warning("skip bad record %s: %s", v, e)
+                    logger.warning("skip bad record %s: %s", v, e)
                     err += 1
                     if total > 100 and err > total * self.err * 10:
                         raise Exception("too many error occured: %s" % (float(err)/total))
@@ -237,7 +238,7 @@ class RDD(object):
                 raise Exception("too many error occured: %s" % (float(err)/total))
 
             return [s] if s is not None else []
-        
+
         return reduce(f, chain(self.ctx.runJob(self, reducePartition)))
 
     def uniq(self, numSplits=None, taskMemory=None):
@@ -365,22 +366,22 @@ class RDD(object):
     def update(self, other, replace_only=False, numSplits=None,
                taskMemory=None):
         rdd = self.mapValue(
-            lambda val: (val, 1)
+            lambda val: (val, 1)  # bin('01') for old rdd
         ).union(
             other.mapValue(
-                lambda val: (val, 2)
+                lambda val: (val, 2)  # bin('10') for new rdd
             )
         ).reduceByKey(
             lambda (val_a, rev_a), (val_b, rev_b): (
-                (val_b if rev_b > rev_a else val_a), (rev_a + rev_b)
+                (val_b if rev_b > rev_a else val_a), (rev_a | rev_b)
             ),
             numSplits,
             taskMemory
         )
         # rev:
-        #   1: old value
-        #   2: new added value
-        #   3: new updated value
+        #   1(01): old value
+        #   2(10): new added value
+        #   3(11): new updated value
         if replace_only:
             rdd = rdd.filter(
                 lambda (key, (val, rev)): rev != 2
@@ -412,7 +413,7 @@ class RDD(object):
                 for ww in wbuf:
                     yield (k, (vv, ww))
         return self.cogroup(other, numSplits, taskMemory).flatMap(dispatch)
-    
+
     def collectAsMap(self):
         d = {}
         for v in self.ctx.runJob(self, lambda x:list(x)):
@@ -614,7 +615,7 @@ class PipedRDD(DerivedRDD):
                 stdout=subprocess.PIPE,
                 stderr=self.quiet and devnull or sys.stderr,
                 shell=self.shell)
-        
+
         def read(stdin):
             try:
                 it = iter(self.prev.iterator(split))
@@ -637,7 +638,7 @@ class PipedRDD(DerivedRDD):
             finally:
                 stdin.close()
                 devnull.close()
-        
+
         self.error = None
         spawn(read, p.stdin)
         return self.read(p)
@@ -727,7 +728,7 @@ class ShuffledRDD(RDD):
         return d
 
     def compute(self, split):
-        merger = Merger(self.numParts, self.aggregator.mergeCombiners) 
+        merger = Merger(self.numParts, self.aggregator.mergeCombiners)
         fetcher = env.shuffleFetcher
         fetcher.fetch(self.shuffleId, split.index, merger.merge)
         return merger
@@ -1058,7 +1059,7 @@ class TextFileRDD(RDD):
             n += 1
         self.splitSize = splitSize
         self.len = n
-        self._splits = [PartialSplit(i, i*splitSize, min(size, (i+1) * splitSize)) 
+        self._splits = [PartialSplit(i, i*splitSize, min(size, (i+1) * splitSize))
                     for i in range(self.len)]
 
     def __len__(self):
@@ -1085,10 +1086,10 @@ class TextFileRDD(RDD):
             return open(self.path, 'r', 4096 * 1024)
 
     def compute(self, split):
-        f = self.open_file() 
+        f = self.open_file()
         #if len(self) == 1 and split.index == 0 and split.begin == 0:
         #    return f
-        
+
         start = split.begin
         end = split.end
         if start > 0:
@@ -1096,7 +1097,7 @@ class TextFileRDD(RDD):
             byte = f.read(1)
             while byte != '\n':
                 byte = f.read(1)
-                if not byte: 
+                if not byte:
                     return []
                 start += 1
 
@@ -1109,7 +1110,7 @@ class TextFileRDD(RDD):
         #        f.seek(end-1)
         #        while f.read(1) not in ('', '\n'):
         #            end += 1
-        #        f.length = end 
+        #        f.length = end
         #    f.seek(start)
         #    return f
 
@@ -1117,7 +1118,10 @@ class TextFileRDD(RDD):
 
     def read(self, f, start, end):
         for line in f:
-            yield line[:-1]
+            if line.endswith('\n'):
+                yield line[:-1]
+            else:
+                yield line
             start += len(line)
             if start >= end: break
         f.close()
@@ -1131,7 +1135,7 @@ class PartialTextFileRDD(TextFileRDD):
         self.firstPos = firstPos
         self.lastPos = lastPos
         self.size = size = lastPos - firstPos
-        
+
         if splitSize is None:
             if numSplits is None:
                 splitSize = self.DEFAULT_SPLIT_SIZE
@@ -1184,7 +1188,8 @@ class GZipFileRDD(TextFileRDD):
                 if not block:
                     return pos # EOF
             try:
-                if zlib.decompressobj(-zlib.MAX_WBITS).decompress(block):
+                dz = zlib.decompressobj(-zlib.MAX_WBITS)
+                if dz.decompress(block) and len(dz.unused_data) <= 8:
                     return pos # FOUND
             except Exception, e:
                 pass
@@ -1238,6 +1243,13 @@ class GZipFileRDD(TextFileRDD):
                         start - old + len(d), self.path)
                 skip_first = True
                 continue
+
+            if len(dz.unused_data) > 8 :
+                f.seek(-len(dz.unused_data)+8, 1)
+                zf = gzip.GzipFile(fileobj=f)
+                zf._read_gzip_header()
+                dz = zlib.decompressobj(-zlib.MAX_WBITS)
+                start -= f.tell()
 
             last_line += io.readline()
             if skip_first:
@@ -1442,7 +1454,7 @@ class OutputTextFileRDD(DerivedRDD):
                 f = open(tpath,'w', 4096 * 1024 * 16)
             if self.compress:
                 have_data = self.write_compress_data(f, self.prev.iterator(split))
-            else:    
+            else:
                 have_data = self.writedata(f, self.prev.iterator(split))
             f.close()
             if have_data and not os.path.exists(path):
@@ -1501,8 +1513,8 @@ class MultiOutputTextFileRDD(OutputTextFileRDD):
             if not os.path.exists(dpath):
                 try: os.mkdir(dpath)
                 except: pass
-            tpath = os.path.join(dpath, 
-                ".%04d%s.%s.%d.tmp" % (self.split.index, self.ext, 
+            tpath = os.path.join(dpath,
+                ".%04d%s.%s.%d.tmp" % (self.split.index, self.ext,
                 socket.gethostname(), os.getpid()))
             self.paths[key] = tpath
         return tpath
@@ -1769,7 +1781,7 @@ class BeansdbFileRDD(TextFileRDD):
         self.func = filter
         self.fullscan = fullscan
         self.raw = raw
-    
+
     @cached
     def __getstate__(self):
         d = RDD.__getstate__(self)
@@ -1783,7 +1795,7 @@ class BeansdbFileRDD(TextFileRDD):
         except Exception:
             print 'load failed', self.__class__, code[:1024]
             raise
-    
+
     def compute(self, split):
         if self.fullscan:
             return self.full_scan(split)
@@ -1817,7 +1829,7 @@ class BeansdbFileRDD(TextFileRDD):
             if func(key):
                 dataf.seek(pos & 0xffffff00)
                 r = self.read_record(dataf)
-                if r: 
+                if r:
                     rsize, key, value = r
                     yield key, value
                 else:
@@ -1831,7 +1843,7 @@ class BeansdbFileRDD(TextFileRDD):
 
     def try_read_record(self, f):
         block = f.read(PADDING)
-        if not block: 
+        if not block:
             return
 
         crc, tstamp, flag, ver, ksz, vsz = struct.unpack("IiiiII", block[:24])
@@ -1849,7 +1861,7 @@ class BeansdbFileRDD(TextFileRDD):
 
     def read_record(self, f):
         block = f.read(PADDING)
-        if len(block) < 24: 
+        if len(block) < 24:
             return
 
         crc, tstamp, flag, ver, ksz, vsz = struct.unpack("IiiiII", block[:24])
@@ -1874,7 +1886,7 @@ class BeansdbFileRDD(TextFileRDD):
 
     def full_scan(self, split):
         f = self.open_file()
-        
+
         # try to find first record
         begin, end = split.begin, split.end
         while True:
@@ -1885,7 +1897,7 @@ class BeansdbFileRDD(TextFileRDD):
             if begin >= end: break
         if begin >= end:
             return
-        
+
         f.seek(begin)
         func = self.func or (lambda x:True)
         while begin < end:
@@ -1929,7 +1941,7 @@ class OutputBeansdbRDD(DerivedRDD):
                             os.remove(os.path.join(p, n))
             else:
                 os.makedirs(p)
-        
+
 
     def __repr__(self):
         return '<%s %s %s>' % (self.__class__.__name__, self.path, self.prev)
@@ -1981,7 +1993,7 @@ class OutputBeansdbRDD(DerivedRDD):
         f = [open(t, 'w', 1<<20) for t in tp]
         now = int(time.time())
         hint = [[] for d in ds]
-        
+
         bits = 32 - self.depth * 4
         for key, value in self.prev.iterator(split):
             key = str(key)

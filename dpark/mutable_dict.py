@@ -68,7 +68,7 @@ class MutableDict(object):
         if values is None:
             for k, v in self._fetch_missing(_key).iteritems():
                 self.data.put((_key, k), v)
-            
+
             values = self.data.get((_key, key))
 
         return values[0] if values is not None else None
@@ -76,8 +76,6 @@ class MutableDict(object):
     def put(self, key, value):
         if isinstance(value, ConflictValues):
             raise TypeError('Cannot put ConflictValues into mutable_dict')
-        if self.is_local:
-            raise RuntimeError('Cannot put in local mode')
 
         self.updated[key] = (value, self.generation)
 

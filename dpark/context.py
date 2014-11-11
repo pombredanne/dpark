@@ -14,7 +14,7 @@ from dpark.tabular import TabularRDD
 import dpark.conf as conf
 from math import ceil
 
-logger = logging.getLogger("context")
+logger = logging.getLogger(__name__)
 
 def singleton(cls):
     instances = {}
@@ -33,6 +33,9 @@ def setup_conf(options):
     elif os.path.exists('/etc/dpark.conf'):
         conf.load_conf('/etc/dpark.conf')
 
+    if options.mem is None:
+        options.mem = conf.MEM_PER_TASK
+
     conf.__dict__.update(os.environ)
     import moosefs
     moosefs.MFS_PREFIX = conf.MOOSEFS_MOUNT_POINTS
@@ -50,10 +53,9 @@ class DparkContext(object):
     def init(self):
         if self.initialized:
             return
-        
+
         options = parse_options()
         self.options = options
-        setup_conf(options) 
 
         master = self.master or options.master
         if master == 'local':
@@ -73,7 +75,7 @@ class DparkContext(object):
                     master = master[master.rfind('//')+2:]
             elif master.startswith('zoo://'):
                 master = 'zk' + master[3:]
-        
+
             if ':' not in master:
                 master += ':5050'
             self.scheduler = MesosScheduler(master, options)
@@ -88,6 +90,10 @@ class DparkContext(object):
         self.defaultMinSplits = max(self.defaultParallelism, 2)
 
         self.initialized = True
+
+    @staticmethod
+    def setLogLevel(level):
+        logging.getLogger('dpark').setLevel(level)
 
     def newShuffleId(self):
         self.nextShuffleId += 1
@@ -164,7 +170,7 @@ class DparkContext(object):
 
     def table(self, path, **kwargs):
         dpath = path[0] if isinstance(path, (list, tuple)) else path
-        for root, dirs, names in walk(dpath): 
+        for root, dirs, names in walk(dpath):
             if '.field_names' in names:
                 p = os.path.join(root, '.field_names')
                 fields = open(p).read().split('\t')
@@ -224,7 +230,7 @@ class DparkContext(object):
 
         self.init()
 
-        env.start(True, isLocal=self.isLocal)
+        env.start(True)
         self.scheduler.start()
         self.started = True
         atexit.register(self.stop)
@@ -293,7 +299,7 @@ def add_default_options():
 
     group.add_option("-c", "--cpus", type="float", default=1.0,
             help="cpus used per task")
-    group.add_option("-M", "--mem", type="float", default=1000.0,
+    group.add_option("-M", "--mem", type="float",
             help="memory used per task")
     group.add_option("-g", "--group", type="string", default="",
             help="which group of machines")
@@ -318,12 +324,24 @@ def add_default_options():
 
 add_default_options()
 
+
 def parse_options():
     options, args = parser.parse_args()
+    setup_conf(options)
+
     options.logLevel = (options.quiet and logging.ERROR
                   or options.verbose and logging.DEBUG or logging.INFO)
 
-    logging.basicConfig(format='%(asctime)-15s [%(levelname)s] [%(name)-9s] %(message)s',
-        level=options.logLevel)
+    log_format = '%(asctime)-15s [%(levelname)s] [%(name)-9s] %(message)s'
+    logging.basicConfig(format=log_format, level=options.logLevel)
+
+    logger = logging.getLogger('dpark')
+    logger.propagate=False
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(log_format))
+
+    logger.addHandler(handler)
+    logger.setLevel(max(options.logLevel, logger.level))
 
     return options

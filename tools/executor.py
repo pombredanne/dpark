@@ -23,8 +23,9 @@ import time
 
 import zmq
 
-import dpark.pymesos as mesos
-from dpark.pymesos import mesos_pb2
+import pymesos as mesos
+from mesos.interface import mesos_pb2
+from mesos.interface import Executor
 
 ctx = zmq.Context()
 
@@ -46,11 +47,12 @@ def reply_status(driver, task_id, status):
     update = mesos_pb2.TaskStatus()
     update.task_id.MergeFrom(task_id)
     update.state = status
+    update.timestamp = time.time()
     driver.sendStatusUpdate(update)
 
 def launch_task(self, driver, task):
     reply_status(driver, task.task_id, mesos_pb2.TASK_RUNNING)
-    
+
     host = socket.gethostname()
     cwd, command, _env, shell, addr1, addr2, addr3 = pickle.loads(task.data)
 
@@ -116,7 +118,7 @@ def launch_task(self, driver, task):
             last_time = now
             try:
                 process = psutil.Process(p.pid)
-                
+
                 rss = sum((proc.get_memory_info().rss
                           for proc in process.get_children(recursive=True)),
                           process.get_memory_info().rss)
@@ -145,7 +147,7 @@ def launch_task(self, driver, task):
         print >>werr, 'exception while open ' + ' '.join(command)
         for line in traceback.format_exc():
             werr.write(line)
-    
+
     reply_status(driver, task.task_id, status)
 
     wout.close()
@@ -156,7 +158,7 @@ def launch_task(self, driver, task):
     self.ps.pop(tid, None)
     self.ts.pop(tid, None)
 
-class MyExecutor(mesos.Executor):
+class MyExecutor(Executor):
     def __init__(self):
         self.ps = {}
         self.ts = {}
@@ -166,12 +168,12 @@ class MyExecutor(mesos.Executor):
         t.daemon = True
         t.start()
         self.ts[task.task_id.value] = t
-  
+
     def killTask(self, driver, task_id):
         try:
             if task_id.value in self.ps:
                 self.ps[task_id.value].kill()
-                reply_status(driver, task_id, mesos_pb2.TASK_KILLED) 
+                reply_status(driver, task_id, mesos_pb2.TASK_KILLED)
         except: pass
 
     def shutdown(self, driver):

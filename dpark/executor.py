@@ -13,11 +13,13 @@ import socket
 import urllib2
 import platform
 import gc
+import time
 
 import zmq
 
 import pymesos as mesos
-import pymesos.mesos_pb2 as mesos_pb2
+from mesos.interface import mesos_pb2
+from mesos.interface import Executor
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from dpark.util import compress, decompress, spawn
@@ -28,7 +30,7 @@ from dpark.env import env
 from dpark.shuffle import LocalFileShuffle
 from dpark.mutable_dict import MutableDict
 
-logger = logging.getLogger("executor@%s" % socket.gethostname())
+logger = logging.getLogger("dpark.executor@%s" % socket.gethostname())
 
 TASK_RESULT_LIMIT = 1024 * 256
 DEFAULT_WEB_PORT = 5055
@@ -47,6 +49,7 @@ def reply_status(driver, task_id, state, data=None):
     status = mesos_pb2.TaskStatus()
     status.task_id.MergeFrom(task_id)
     status.state = state
+    status.timestamp = time.time()
     if data is not None:
         status.data = data
     driver.sendStatusUpdate(status)
@@ -175,7 +178,7 @@ def safe(f):
             r = f(self, *a, **kw)
         return r
     return _
-            
+
 def setup_cleaner_process(workdir):
     ppid = os.getpid()
     pid = os.fork()
@@ -187,7 +190,7 @@ def setup_cleaner_process(workdir):
                 import psutil
             except ImportError:
                 os._exit(1)
-            try: 
+            try:
                 psutil.Process(ppid).wait()
                 os.killpg(ppid, signal.SIGKILL) # kill workers
             except Exception, e:
@@ -200,7 +203,7 @@ def setup_cleaner_process(workdir):
         os._exit(0)
     os.wait()
 
-class MyExecutor(mesos.Executor):
+class MyExecutor(Executor):
     def __init__(self):
         self.workdir = []
         self.idle_workers = []
@@ -211,7 +214,7 @@ class MyExecutor(mesos.Executor):
         sys.stdout = os.fdopen(wfd, 'w', 0)
         os.close(1)
         assert os.dup(wfd) == 1, 'redirect io failed'
-        
+
         self.stderr, wfd = os.pipe()
         sys.stderr = os.fdopen(wfd, 'w', 0)
         os.close(2)
@@ -262,7 +265,7 @@ class MyExecutor(mesos.Executor):
                             + "use -M to request or taskMemory for more memory", tid, rss, offered)
                     mem_limit[tid] = rss / offered + 0.1
 
-            now = time.time() 
+            now = time.time()
             n = len([1 for t, p in self.idle_workers if t + MAX_WORKER_IDLE_TIME < now])
             if n:
                 for _, p in self.idle_workers[:n]:
@@ -272,11 +275,11 @@ class MyExecutor(mesos.Executor):
             if self.busy_workers or self.idle_workers:
                 idle_since = now
             elif idle_since + MAX_EXECUTOR_IDLE_TIME < now:
-                os._exit(0) 
-            
+                os._exit(0)
+
             self.lock.release()
-            
-            time.sleep(1) 
+
+            time.sleep(1)
 
     @safe
     def registered(self, driver, executorInfo, frameworkInfo, slaveInfo):
@@ -300,7 +303,7 @@ class MyExecutor(mesos.Executor):
                     logger.warning("change cwd to %s failed: %s", cwd, e)
             else:
                 logger.warning("cwd (%s) not exists", cwd)
-            
+
             self.workdir = args['WORKDIR']
             root = os.path.dirname(self.workdir[0])
             if not os.path.exists(root):
@@ -332,7 +335,7 @@ class MyExecutor(mesos.Executor):
     def launchTask(self, driver, task):
         task_id = task.task_id
         reply_status(driver, task_id, mesos_pb2.TASK_RUNNING)
-        logging.debug("launch task %s", task.task_id.value)
+        logger.debug("launch task %s", task.task_id.value)
         try:
             def callback((state, data)):
                 reply_status(driver, task_id, state, data)
@@ -340,7 +343,7 @@ class MyExecutor(mesos.Executor):
                     _, pool = self.busy_workers.pop(task.task_id.value)
                     pool.done += 1
                     self.idle_workers.append((time.time(), pool))
-        
+
             pool = self.get_idle_worker()
             self.busy_workers[task.task_id.value] = (task, pool)
             pool.apply_async(run_task, [task.data], callback=callback)
@@ -374,14 +377,14 @@ class MyExecutor(mesos.Executor):
         for d in self.workdir:
             try: shutil.rmtree(d, True)
             except: pass
-        
+
         sys.stdout.close()
         sys.stderr.close()
         os.close(1)
         os.close(2)
         self.outt.join()
         self.errt.join()
-        
+
 def run():
     executor = MyExecutor()
     driver = mesos.MesosExecutorDriver(executor)

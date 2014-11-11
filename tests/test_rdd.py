@@ -6,9 +6,12 @@ import pprint
 import random
 import operator
 import shutil
+import logging
 from dpark.context import *
 from dpark.rdd import *
 from dpark.accumulator import *
+
+logging.getLogger('dpark').setLevel(logging.ERROR)
 
 class TestRDD(unittest.TestCase):
     def setUp(self):
@@ -72,6 +75,8 @@ class TestRDD(unittest.TestCase):
                 [(1, (4,None)), (2, (5, 1)), (3, (6, 2)), (3, (7, 2))])
         self.assertEqual(sorted(nums.rightOuterJoin(nums2).collect()),
                 [(2, (5,1)), (3, (6,2)), (3, (7,2)), (4,(None,3))])
+        self.assertEqual(nums.innerJoin(nums2).collect(),
+                [(2, (5, 1)), (3, (6, 2)), (3, (7, 2))])
 
         self.assertEqual(nums.mapValue(lambda x:x+1).collect(),
                 [(1, 5), (2, 6), (3, 7), (3, 8)])
@@ -83,29 +88,43 @@ class TestRDD(unittest.TestCase):
                 [(1, ([4],[])), (2, ([5],[1])), (3,([6,7],[2])), (4,([],[3]))])
         nums3 = self.sc.makeRDD(zip([4,5,1], [1,2,3]), 1).groupByKey(2).flatMapValue(lambda x:x)
         self.assertEqual(sorted(nums.groupWith([nums2, nums3]).collect()),
-                [(1, ([4],[],[3])), (2, ([5],[1],[])), (3,([6,7],[2],[])), 
+                [(1, ([4],[],[3])), (2, ([5],[1],[])), (3,([6,7],[2],[])),
                 (4,([],[3],[1])), (5,([],[],[2]))])
 
         # update
         rdd4 = self.sc.makeRDD([('foo', 1), ('wtf', 233)])
         rdd5 = self.sc.makeRDD([('foo', 2), ('bar', 3), ('wtf', None)])
+        rdd6 = self.sc.makeRDD([('dup', 1), ('dup', 2), ('duq', 3), ('duq', 4),
+                                ('foo', 5)])
+        rdd7 = self.sc.makeRDD([('duq', 6), ('duq', 7), ('duq', 8), ('dup', 9),
+                                ('bar', 10)])
+        dct = rdd6.update(rdd7).collectAsMap()
+        dct2 = rdd7.update(rdd6).collectAsMap()
 
         self.assertEqual(
-                rdd4.update(rdd5, replace_only=True).collectAsMap(),
-                dict([('foo', 2), ('wtf', None)])
+            rdd4.update(rdd5, replace_only=True).collectAsMap(),
+            dict([('foo', 2), ('wtf', None)])
         )
         self.assertEqual(
-                rdd5.update(rdd4, replace_only=True).collectAsMap(),
-                dict([('foo', 1), ('bar', 3), ('wtf', 233)])
+            rdd5.update(rdd4, replace_only=True).collectAsMap(),
+            dict([('foo', 1), ('bar', 3), ('wtf', 233)])
         )
         self.assertEqual(
-                rdd4.update(rdd5).collectAsMap(),
-                dict([('foo', 2), ('bar', 3), ('wtf', None)])
+            rdd4.update(rdd5).collectAsMap(),
+            dict([('foo', 2), ('bar', 3), ('wtf', None)])
         )
         self.assertEqual(
-                rdd5.update(rdd4).collectAsMap(),
-                dict([('foo', 1), ('bar', 3), ('wtf', 233)])
+            rdd5.update(rdd4).collectAsMap(),
+            dict([('foo', 1), ('bar', 3), ('wtf', 233)])
         )
+        self.assertEqual(dct.get('dup'), 9)
+        self.assertEqual(dct.get('foo'), 5)
+        self.assertTrue(dct.get('duq') in {6, 7, 8})
+        self.assertEqual(dct.get('bar'), 10)
+        self.assertTrue(dct2.get('dup') in {1, 2})
+        self.assertEqual(dct2.get('foo'), 5)
+        self.assertTrue(dct2.get('duq') in {3, 4})
+        self.assertEqual(dct2.get('bar'), 10)
 
     def test_accumulater(self):
         d = range(4)
@@ -205,7 +224,7 @@ class TestRDD(unittest.TestCase):
         self.assertEqual(rdd.filter(lambda x: len(x)<=2 or len(x) >100).collect(), [])
 
     def test_partial_file(self):
-        p = 'tests/test_rdd.py' 
+        p = 'tests/test_rdd.py'
         l = 300
         d = open(p).read(l+50)
         start = 100
@@ -213,7 +232,7 @@ class TestRDD(unittest.TestCase):
             start += 1
         while d[l-1] != '\n':
             l += 1
-        d = d[start:l-1] 
+        d = d[start:l-1]
         rdd = self.sc.partialTextFile(p, start, l, l)
         self.assertEqual('\n'.join(rdd.collect()), d)
         rdd = self.sc.partialTextFile(p, start, l, (l-start)/5)
@@ -224,7 +243,7 @@ class TestRDD(unittest.TestCase):
         l = range(N)
         d = zip(map(str, l), l)
         rdd = self.sc.makeRDD(d, 10)
-        self.assertEqual(rdd.saveAsBeansdb('/tmp/beansdb'), 
+        self.assertEqual(rdd.saveAsBeansdb('/tmp/beansdb'),
                        ['/tmp/beansdb/%03d.data' % i for i in range(10)])
         rdd = self.sc.beansdb('/tmp/beansdb', depth=0)
         self.assertEqual(len(rdd), 10)
@@ -232,7 +251,7 @@ class TestRDD(unittest.TestCase):
         self.assertEqual(sorted(rdd.map(lambda (k,v):(k,v[0])).collect()), sorted(d))
         s = rdd.map(lambda x:x[1][0]).reduce(lambda x,y:x+y)
         self.assertEqual(s, sum(l))
-    
+
         rdd = self.sc.beansdb('/tmp/beansdb', depth=0, fullscan=True)
         self.assertEqual(len(rdd), 10)
         self.assertEqual(rdd.count(), N)
@@ -279,7 +298,7 @@ class TestRDD(unittest.TestCase):
                 pass
 
 
-    
+
 #class TestRDDInProcess(TestRDD):
 #    def setUp(self):
 #        self.sc = DparkContext("process")
